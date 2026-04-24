@@ -7,6 +7,7 @@ import json
 import asyncio
 import logging
 import uuid
+import urllib.request
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -311,34 +312,36 @@ async def a2a_root(request: Request):
     body = await request.json()
     method = body.get("method", "")
     if method in ("message/stream", "tasks/resubscribe"):
-        return await _handle_stream(body)
-    return await _handle_send(body)
+        return await _handle_stream(body, request)
+    return await _handle_send(body, request)
 
 
 @app.post("/send-message")
 async def send_message(request: Request):
     """Legacy send-message endpoint."""
     body = await request.json()
-    return await _handle_send(body)
+    return await _handle_send(body, request)
 
 
 @app.post("/send-message-stream")
 async def send_message_stream(request: Request):
     """Legacy streaming endpoint."""
     body = await request.json()
-    return await _handle_stream(body)
+    return await _handle_stream(body, request)
 
 
-async def _handle_send(body: dict):
+async def _handle_send(body: dict, request: Request = None):
     """Handle message/send — returns JSON response."""
     user_message = _extract_text(body)
     task_id = body.get("params", {}).get("taskId") or str(uuid.uuid4())
     context_id = body.get("params", {}).get("contextId") or task_id
+    user_id = (request.headers.get("X-User-ID", "") if request else "") or "admin@kagent.dev"
 
     logger.info(f"Received message (task={task_id}): {user_message[:100]}...")
 
     try:
         result_text = await run_claude_code(user_message)
+        await _persist_task(task_id, context_id, user_message, result_text, user_id)
         return JSONResponse(content={
             "jsonrpc": "2.0",
             "id": body.get("id"),
@@ -367,11 +370,12 @@ async def _handle_send(body: dict):
         })
 
 
-async def _handle_stream(body: dict):
+async def _handle_stream(body: dict, request: Request = None):
     """Handle message/stream — returns SSE response."""
     user_message = _extract_text(body)
     task_id = body.get("params", {}).get("taskId") or str(uuid.uuid4())
     context_id = body.get("params", {}).get("contextId") or task_id
+    user_id = (request.headers.get("X-User-ID", "") if request else "") or "admin@kagent.dev"
 
     logger.info(f"Received streaming message (task={task_id}): {user_message[:100]}...")
 
@@ -400,6 +404,8 @@ async def _handle_stream(body: dict):
                 "lastChunk": last_chunk,
                 "append": False,
             })
+            # Persist task to kagent DB so it survives page refresh
+            await _persist_task(task_id, context_id, user_message, result_text, user_id)
             # Send completed (final)
             yield _sse_event({
                 "kind": "status-update",
@@ -420,15 +426,64 @@ async def _handle_stream(body: dict):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-CLAUDE_TIMEOUT = int(os.getenv("CLAUDE_TIMEOUT", "550"))  # 50s before kagent's 600s streaming-timeout
+KAGENT_API = os.getenv("KAGENT_API_URL", "http://kagent-controller.kagent.svc.cluster.local:8083")
+
+
+def _persist_task_sync(task_id: str, context_id: str, user_message: str, result_text: str, user_id: str):
+    """Persist task to kagent DB via POST /api/tasks (blocking, run in executor)."""
+    task = {
+        "kind": "task",
+        "id": task_id,
+        "contextId": context_id,
+        "status": {"state": "completed"},
+        "artifacts": [{"parts": [{"kind": "text", "text": result_text}]}],
+        "history": [
+            {
+                "kind": "message",
+                "role": "user",
+                "messageId": f"msg-user-{task_id}",
+                "parts": [{"kind": "text", "text": user_message}],
+            },
+            {
+                "kind": "message",
+                "role": "agent",
+                "messageId": f"msg-agent-{task_id}",
+                "parts": [{"kind": "text", "text": result_text}],
+            },
+        ],
+    }
+    payload = json.dumps(task).encode()
+    req = urllib.request.Request(
+        f"{KAGENT_API}/api/tasks",
+        data=payload,
+        headers={"Content-Type": "application/json", "X-User-ID": user_id},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            logger.info(f"Task persisted to kagent DB (status={resp.status}, task_id={task_id})")
+    except Exception as e:
+        logger.warning(f"Failed to persist task {task_id} to kagent DB: {e}")
+
+
+async def _persist_task(task_id: str, context_id: str, user_message: str, result_text: str, user_id: str):
+    """Async wrapper for _persist_task_sync."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _persist_task_sync, task_id, context_id, user_message, result_text, user_id)
+
+
+
 
 
 async def run_claude_code(prompt: str) -> str:
     """Run Claude Code CLI as subprocess and return the result text."""
+    debug_mode = os.getenv("CLAUDE_DEBUG", "").lower() in ("1", "true", "yes")
+    output_format = "json" if debug_mode else "text"
+
     cmd = [
         "claude",
         "--print",  # Non-interactive, output result only
-        "--output-format", "text",
+        "--output-format", output_format,
         "--max-turns", "50",
         "--model", CLAUDE_MODEL,
         "--system-prompt", SYSTEM_PROMPT,
@@ -443,7 +498,7 @@ async def run_claude_code(prompt: str) -> str:
     if "ANTHROPIC_BASE_URL" not in env:
         logger.warning("ANTHROPIC_BASE_URL not set! Claude Code may use default Anthropic API.")
 
-    logger.info(f"Executing Claude Code: prompt={prompt[:80]}...")
+    logger.info(f"Executing Claude Code: prompt={prompt[:80]}... (debug={debug_mode})")
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -471,9 +526,55 @@ async def run_claude_code(prompt: str) -> str:
         logger.error(f"Claude Code failed (rc={proc.returncode}): {error_msg}")
         raise RuntimeError(f"Claude Code exited with code {proc.returncode}: {error_msg}")
 
-    result = stdout.decode().strip()
-    logger.info(f"Claude Code result: {result[:200]}...")
-    return result
+    raw = stdout.decode().strip()
+
+    if debug_mode:
+        return _parse_json_output(raw)
+    else:
+        logger.info(f"Claude Code result: {raw[:200]}...")
+        return raw
+
+
+def _parse_json_output(raw: str) -> str:
+    """Parse --output-format json, log each tool use, return final text."""
+    result_text = ""
+    try:
+        messages = json.loads(raw)
+        if not isinstance(messages, list):
+            messages = [messages]
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse JSON output, returning raw")
+        return raw
+
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", [])
+        if isinstance(content, str):
+            if role == "assistant":
+                result_text = content
+            continue
+        for block in content:
+            btype = block.get("type", "")
+            if btype == "text":
+                if role == "assistant":
+                    result_text = block.get("text", "")
+            elif btype == "tool_use":
+                tool_name = block.get("name", "")
+                tool_input = block.get("input", {})
+                if tool_name == "Bash":
+                    cmd_str = tool_input.get("command", "")[:200]
+                    logger.info(f"[tool_use] Bash: {cmd_str}")
+                else:
+                    input_summary = json.dumps(tool_input)[:200]
+                    logger.info(f"[tool_use] {tool_name}: {input_summary}")
+            elif btype == "tool_result":
+                content_val = block.get("content", "")
+                if isinstance(content_val, list):
+                    content_val = " ".join(c.get("text", "") for c in content_val)
+                logger.info(f"[tool_result] {str(content_val)[:300]}")
+
+    logger.info(f"Claude Code result: {result_text[:200]}...")
+    return result_text
 
 
 def _extract_text(body: dict) -> str:
