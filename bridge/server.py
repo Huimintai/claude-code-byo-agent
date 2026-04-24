@@ -475,6 +475,9 @@ async def _persist_task(task_id: str, context_id: str, user_message: str, result
 
 
 
+CLAUDE_TIMEOUT = int(os.getenv("CLAUDE_TIMEOUT", "550"))  # 50s before kagent's 600s streaming-timeout
+
+
 async def run_claude_code(prompt: str) -> str:
     """Run Claude Code CLI as subprocess and return the result text."""
     debug_mode = os.getenv("CLAUDE_DEBUG", "").lower() in ("1", "true", "yes")
