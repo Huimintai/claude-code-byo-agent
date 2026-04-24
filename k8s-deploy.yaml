@@ -96,29 +96,29 @@ spec:
   type: ClusterIP
 
 # =============================================================================
-# 3. Claude Code BYO Agent
+# 3. Claude Code BYO Agent (claude-code-agent)
 # =============================================================================
 ---
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
 metadata:
-  name: claude-code-k8s-agent
+  name: claude-code-agent
   namespace: dbci-agent
 spec:
   type: BYO
-  description: "K8s operations agent powered by Claude Code CLI — no MCP tools needed"
+  description: "K8s and CI/CD operations agent powered by Claude Code CLI"
   byo:
     deployment:
-      image: huimin123/claude-code-byo-agent:v19
+      image: huimin123/claude-code-byo-agent:v21
       env:
         - name: ANTHROPIC_BASE_URL
           value: "http://sap-ai-proxy.dbci-agent.svc.cluster.local:3030"
         - name: ANTHROPIC_API_KEY
           value: "not-needed-proxy-handles-auth"
         - name: AGENT_NAME
-          value: "claude_code_k8s_agent"
+          value: "claude_code_agent"
         - name: AGENT_DESCRIPTION
-          value: "K8s operations agent powered by Claude Code - no MCP tools, full CLI capability"
+          value: "K8s and CI/CD operations agent powered by Claude Code"
         - name: CLAUDE_MODEL
           value: "claude-sonnet-4-5-20250929"
         - name: PORT
@@ -128,34 +128,6 @@ spec:
             secretKeyRef:
               name: github-mcp-pat
               key: GITHUB_PERSONAL_ACCESS_TOKEN
-        - name: GITLAB_URL
-          valueFrom:
-            secretKeyRef:
-              name: bastion-ci-credentials
-              key: GITLAB_URL
-        - name: GITLAB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: bastion-ci-credentials
-              key: GITLAB_TOKEN
-        - name: JENKINS_URL
-          valueFrom:
-            secretKeyRef:
-              name: bastion-ci-credentials
-              key: JENKINS_URL
-              optional: true
-        - name: JENKINS_USER
-          valueFrom:
-            secretKeyRef:
-              name: bastion-ci-credentials
-              key: JENKINS_USER
-              optional: true
-        - name: JENKINS_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: bastion-ci-credentials
-              key: JENKINS_TOKEN
-              optional: true
         - name: HANA_HOST
           valueFrom:
             secretKeyRef:

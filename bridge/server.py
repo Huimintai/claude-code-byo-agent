@@ -250,6 +250,7 @@ async def _handle_send(body: dict):
     """Handle message/send — returns JSON response."""
     user_message = _extract_text(body)
     task_id = body.get("params", {}).get("taskId") or str(uuid.uuid4())
+    context_id = body.get("params", {}).get("contextId") or task_id
 
     logger.info(f"Received message (task={task_id}): {user_message[:100]}...")
 
@@ -259,11 +260,13 @@ async def _handle_send(body: dict):
             "jsonrpc": "2.0",
             "id": body.get("id"),
             "result": {
+                "kind": "task",
                 "id": task_id,
+                "contextId": context_id,
                 "status": {"state": "completed"},
                 "artifacts": [
                     {
-                        "parts": [{"type": "text", "text": result_text}],
+                        "parts": [{"kind": "text", "text": result_text}],
                     }
                 ],
             },

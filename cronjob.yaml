@@ -1,6 +1,6 @@
 # =============================================================================
 # Scheduled Pipeline Report CronJob
-# Sends a request to claude-code-agent via kagent controller every 6 hours.
+# Sends a request to claude-code-agent every 6 hours.
 # Results appear in kagent UI under claude-code-agent chat history.
 #
 # Deploy: kubectl apply -f cronjob.yaml -n dbci-agent
@@ -11,72 +11,79 @@ metadata:
   name: pipeline-report-scheduler
   namespace: dbci-agent
 spec:
-  schedule: "0 */6 * * *"   # Every 6 hours: 00:00, 06:00, 12:00, 18:00 UTC
+  schedule: "0 8 * * *"   # Every day at 08:00 UTC
   concurrencyPolicy: Forbid  # Skip if previous run still going
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
       backoffLimit: 1
-      activeDeadlineSeconds: 600  # Kill job if it runs over 10 minutes
+      activeDeadlineSeconds: 660  # Kill job if it runs over 11 minutes
       template:
         spec:
           restartPolicy: Never
           containers:
             - name: scheduler
-              image: curlimages/curl:8.6.0
+              image: python:3.11-alpine
               command:
                 - /bin/sh
                 - -c
                 - |
                   set -e
+                  apk add --no-cache curl >/dev/null 2>&1
+
                   KAGENT_API="http://kagent-controller.kagent.svc.cluster.local:8083"
+                  AGENT_URL="http://claude-code-agent.dbci-agent.svc.cluster.local:8080"
                   AGENT_REF="dbci_agent__NS__claude_code_agent"
                   REPORT_TIME=$(date -u "+%Y-%m-%d %H:00 UTC")
+                  USER_ID="huimin.tai@sap.com"
 
                   echo "=== Pipeline Report Scheduler: ${REPORT_TIME} ==="
 
-                  # Step 1: Create a new session for this scheduled run
+                  # Step 1: Create a named session visible to the correct UI user
                   echo "Creating session..."
                   SESSION_RESP=$(curl -sf -X POST "${KAGENT_API}/api/sessions" \
                     -H "Content-Type: application/json" \
+                    -H "X-User-ID: ${USER_ID}" \
                     -d "{\"agent_ref\":\"${AGENT_REF}\",\"name\":\"[Scheduled] Pipeline Report ${REPORT_TIME}\"}")
-                  echo "Session response: ${SESSION_RESP}"
-
                   SESSION_ID=$(echo "${SESSION_RESP}" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
                   if [ -z "${SESSION_ID}" ]; then
-                    echo "ERROR: Failed to get session ID"
+                    echo "ERROR: Failed to get session ID from: ${SESSION_RESP}"
                     exit 1
                   fi
                   echo "Session ID: ${SESSION_ID}"
 
-                  # Step 2: Send the A2A message to trigger the agent
-                  echo "Sending message to agent..."
-                  MSG_RESP=$(curl -sf -X POST \
-                    "${KAGENT_API}/api/a2a/dbci-agent/claude-code-agent" \
+                  # Step 2: Call BYO agent directly and save response to file (avoids shell quoting issues)
+                  PROMPT_TEXT="[定时报告 ${REPORT_TIME}] 请使用 HANA 数据库执行以下分析并生成报告：\n1. 最近24小时 pipeline 整体失败率\n2. 失败次数最多的 Top 5 Pipeline（按 SOURCE_BRANCH 分组）\n3. 当前是否有运行超过6小时的僵尸 Pipeline\n\n请用中文回复，结果用表格展示。"
+                  echo "Calling agent (this may take ~2 minutes for HANA queries)..."
+                  curl -sf --max-time 600 -X POST "${AGENT_URL}/" \
                     -H "Content-Type: application/json" \
-                    -d "{
-                      \"jsonrpc\": \"2.0\",
-                      \"id\": \"scheduled-$(date +%s)\",
-                      \"method\": \"message/send\",
-                      \"params\": {
-                        \"contextId\": \"${SESSION_ID}\",
-                        \"message\": {
-                          \"role\": \"user\",
-                          \"parts\": [{
-                            \"kind\": \"text\",
-                            \"text\": \"[定时报告 ${REPORT_TIME}] 请使用 HANA 数据库执行以下分析并生成报告：\n1. 最近24小时 pipeline 整体失败率\n2. 失败次数最多的 Top 5 Pipeline（按 SOURCE_BRANCH 分组）\n3. 当前是否有运行超过6小时的僵尸 Pipeline\n\n请用中文回复，结果用表格展示。\"
-                          }]
-                        }
-                      }
-                    }")
+                    -d "{\"jsonrpc\":\"2.0\",\"id\":\"sched-$(date +%s)\",\"method\":\"message/send\",\"params\":{\"contextId\":\"${SESSION_ID}\",\"message\":{\"role\":\"user\",\"parts\":[{\"kind\":\"text\",\"text\":\"${PROMPT_TEXT}\"}]}}}" \
+                    -o /tmp/agent_resp.json
+                  echo "Agent responded."
 
-                  echo "Message response: $(echo ${MSG_RESP} | head -c 500)"
-                  echo "=== Done ==="
+                  # Step 3: Build task JSON with history using Python (handles JSON encoding safely)
+                  # The Python script is base64-encoded to avoid YAML/shell quoting issues.
+                  echo "aW1wb3J0IHN5cywganNvbgoKYWdlbnRfcmVzcF9maWxlID0gc3lzLmFyZ3ZbMV0KcHJvbXB0X3RleHQgPSBzeXMuYXJndlsyXQp0YXNrX2lkX2hpbnQgPSBzeXMuYXJndlszXQpjdHhfaWQgPSBzeXMuYXJndls0XQp1c2VyX21zZ19pZCA9IHN5cy5hcmd2WzVdCmFnZW50X21zZ19pZCA9IHN5cy5hcmd2WzZdCgp3aXRoIG9wZW4oYWdlbnRfcmVzcF9maWxlKSBhcyBmOgogICAgZGF0YSA9IGpzb24ubG9hZChmKQoKdHJ5OgogICAgcmVwbHkgPSBkYXRhWydyZXN1bHQnXVsnYXJ0aWZhY3RzJ11bMF1bJ3BhcnRzJ11bMF1bJ3RleHQnXQpleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICByZXBseSA9ICco5oql5ZGK5o+Q5Y+W5aSx6LSlOiAnICsgc3RyKGUpICsgJyknCgp0YXNrX2lkID0gdGFza19pZF9oaW50IG9yIGN0eF9pZAoKdGFzayA9IHsKICAgICdraW5kJzogJ3Rhc2snLAogICAgJ2lkJzogdGFza19pZCwKICAgICdjb250ZXh0SWQnOiBjdHhfaWQsCiAgICAnc3RhdHVzJzogeydzdGF0ZSc6ICdjb21wbGV0ZWQnfSwKICAgICdhcnRpZmFjdHMnOiBbeydwYXJ0cyc6IFt7J2tpbmQnOiAndGV4dCcsICd0ZXh0JzogcmVwbHl9XX1dLAogICAgJ2hpc3RvcnknOiBbCiAgICAgICAgewogICAgICAgICAgICAna2luZCc6ICdtZXNzYWdlJywKICAgICAgICAgICAgJ3JvbGUnOiAndXNlcicsCiAgICAgICAgICAgICdtZXNzYWdlSWQnOiB1c2VyX21zZ19pZCwKICAgICAgICAgICAgJ3BhcnRzJzogW3sna2luZCc6ICd0ZXh0JywgJ3RleHQnOiBwcm9tcHRfdGV4dH1dCiAgICAgICAgfSwKICAgICAgICB7CiAgICAgICAgICAgICdraW5kJzogJ21lc3NhZ2UnLAogICAgICAgICAgICAncm9sZSc6ICdhZ2VudCcsCiAgICAgICAgICAgICdtZXNzYWdlSWQnOiBhZ2VudF9tc2dfaWQsCiAgICAgICAgICAgICdwYXJ0cyc6IFt7J2tpbmQnOiAndGV4dCcsICd0ZXh0JzogcmVwbHl9XQogICAgICAgIH0KICAgIF0KfQpwcmludChqc29uLmR1bXBzKHRhc2spKQ==" | base64 -d > /tmp/build_task.py
+
+                  TASK_ID=$(grep -o '"id":"[^"]*"' /tmp/agent_resp.json | head -1 | cut -d'"' -f4)
+                  if [ -z "${TASK_ID}" ]; then TASK_ID="task-$(date +%s)"; fi
+                  USER_MSG_ID="msg-user-$(date +%s)"
+                  AGENT_MSG_ID="msg-agent-$(date +%s)1"
+
+                  python3 /tmp/build_task.py /tmp/agent_resp.json "${PROMPT_TEXT}" "${TASK_ID}" "${SESSION_ID}" "${USER_MSG_ID}" "${AGENT_MSG_ID}" > /tmp/task.json
+                  echo "Task JSON built ($(wc -c < /tmp/task.json) bytes)"
+
+                  STORE_RESP=$(curl -sf -X POST "${KAGENT_API}/api/tasks" \
+                    -H "Content-Type: application/json" \
+                    -H "X-User-ID: ${USER_ID}" \
+                    -d @/tmp/task.json)
+                  echo "Task stored: $(echo ${STORE_RESP} | head -c 200)"
+                  echo "=== Done — check kagent UI for session: ${SESSION_ID} ==="
               resources:
                 requests:
-                  memory: "32Mi"
-                  cpu: "10m"
-                limits:
                   memory: "64Mi"
                   cpu: "50m"
+                limits:
+                  memory: "128Mi"
+                  cpu: "200m"
