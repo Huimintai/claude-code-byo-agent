@@ -109,7 +109,7 @@ spec:
   description: "K8s and CI/CD operations agent powered by Claude Code CLI"
   byo:
     deployment:
-      image: huimin123/claude-code-byo-agent:v24
+      image: huimin123/claude-code-byo-agent:v25
       env:
         - name: ANTHROPIC_BASE_URL
           value: "http://sap-ai-proxy.dbci-agent.svc.cluster.local:3030"
