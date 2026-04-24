@@ -539,43 +539,22 @@ async def run_claude_code(prompt: str) -> str:
 
 
 def _parse_json_output(raw: str) -> str:
-    """Parse --output-format json, log each tool use, return final text."""
-    result_text = ""
+    """Parse --output-format json, log execution stats, return final text.
+
+    Claude Code json format is a single flat object with a 'result' field,
+    not a messages array. It contains stats but not per-turn tool_use details.
+    """
     try:
-        messages = json.loads(raw)
-        if not isinstance(messages, list):
-            messages = [messages]
+        data = json.loads(raw)
     except json.JSONDecodeError:
         logger.warning("Failed to parse JSON output, returning raw")
         return raw
 
-    for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content", [])
-        if isinstance(content, str):
-            if role == "assistant":
-                result_text = content
-            continue
-        for block in content:
-            btype = block.get("type", "")
-            if btype == "text":
-                if role == "assistant":
-                    result_text = block.get("text", "")
-            elif btype == "tool_use":
-                tool_name = block.get("name", "")
-                tool_input = block.get("input", {})
-                if tool_name == "Bash":
-                    cmd_str = tool_input.get("command", "")[:200]
-                    logger.info(f"[tool_use] Bash: {cmd_str}")
-                else:
-                    input_summary = json.dumps(tool_input)[:200]
-                    logger.info(f"[tool_use] {tool_name}: {input_summary}")
-            elif btype == "tool_result":
-                content_val = block.get("content", "")
-                if isinstance(content_val, list):
-                    content_val = " ".join(c.get("text", "") for c in content_val)
-                logger.info(f"[tool_result] {str(content_val)[:300]}")
-
+    result_text = data.get("result", "")
+    num_turns = data.get("num_turns", "?")
+    duration_ms = data.get("duration_ms", 0)
+    cost_usd = data.get("total_cost_usd", 0)
+    logger.info(f"[debug] turns={num_turns} duration={duration_ms}ms cost=${cost_usd:.4f}")
     logger.info(f"Claude Code result: {result_text[:200]}...")
     return result_text
 
