@@ -36,7 +36,9 @@ spec:
                   AGENT_URL="http://claude-code-agent.dbci-agent.svc.cluster.local:8080"
                   AGENT_REF="dbci_agent__NS__claude_code_agent"
                   REPORT_TIME=$(date -u "+%Y-%m-%d %H:00 UTC")
-                  USER_ID="huimin.tai@sap.com"
+                  # Set USER_ID to the kagent UI user whose session list should show the reports.
+                  # Replace with your actual login email (the one shown in kagent UI top-right).
+                  USER_ID="<YOUR_KAGENT_UI_USER_EMAIL>"
 
                   echo "=== Pipeline Report Scheduler: ${REPORT_TIME} ==="
 
