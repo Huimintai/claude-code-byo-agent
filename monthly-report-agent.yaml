@@ -1,0 +1,50 @@
+# =============================================================================
+# Monthly Report Agent
+# A dedicated BYO agent for generating HC01 monthly deployment error reports.
+# Uses the same claude-code-byo-agent image but with a focused system prompt
+# and Jira credentials for ticket analysis.
+#
+# Deploy: kubectl apply -f monthly-report-agent.yaml -n dbci-agent
+# Usage:  Ask "请生成2026年3月的HC01部署错误月报" in kagent UI
+# =============================================================================
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: monthly-report-agent
+  namespace: dbci-agent
+spec:
+  type: BYO
+  description: "Monthly HC01 deployment error report generator — analyzes Jira tickets and classifies errors"
+  byo:
+    deployment:
+      image: huimin123/claude-code-byo-agent:v21
+      env:
+        - name: ANTHROPIC_BASE_URL
+          value: "http://sap-ai-proxy.dbci-agent.svc.cluster.local:3030"
+        - name: ANTHROPIC_API_KEY
+          value: "not-needed-proxy-handles-auth"
+        - name: AGENT_NAME
+          value: "monthly_report_agent"
+        - name: AGENT_DESCRIPTION
+          value: "Monthly HC01 deployment error report generator"
+        - name: CLAUDE_MODEL
+          value: "claude-sonnet-4-5-20250929"
+        - name: PORT
+          value: "8080"
+        - name: JIRA_URL
+          valueFrom:
+            secretKeyRef:
+              name: bastion-ci-credentials
+              key: JIRA_URL
+        - name: JIRA_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: bastion-ci-credentials
+              key: JIRA_TOKEN
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "200m"
+        limits:
+          memory: "1Gi"
+          cpu: "1000m"

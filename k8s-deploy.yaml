@@ -148,6 +148,16 @@ spec:
             secretKeyRef:
               name: bastion-ci-credentials
               key: HANA_DB_PASSWORD
+        - name: JIRA_URL
+          valueFrom:
+            secretKeyRef:
+              name: bastion-ci-credentials
+              key: JIRA_URL
+        - name: JIRA_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: bastion-ci-credentials
+              key: JIRA_TOKEN
       resources:
         requests:
           memory: "256Mi"

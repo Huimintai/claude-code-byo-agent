@@ -52,6 +52,7 @@ _CI_ENV_KEYS = [
     "GITLAB_URL", "GITLAB_TOKEN",
     "JENKINS_URL", "JENKINS_USER", "JENKINS_TOKEN",
     "HANA_HOST", "HANA_PORT", "HANA_USER", "HANA_PASSWORD",
+    "JIRA_URL", "JIRA_TOKEN",
 ]
 
 
@@ -60,6 +61,7 @@ def _ci_skills_section() -> str:
     gitlab_url = os.getenv("GITLAB_URL", "")
     jenkins_url = os.getenv("JENKINS_URL", "")
     hana_host = os.getenv("HANA_HOST", "")
+    jira_url = os.getenv("JIRA_URL", "")
 
     sections = []
 
@@ -126,6 +128,87 @@ Key baselines: PR failure rate ~48%, Deployment ~6.6%, Integration Tests cause 9
     return "\n\n# CI/CD Skills\n" + "\n\n".join(sections)
 
 
+def _monthly_report_skill() -> str:
+    """Return the monthly HC01 deployment error report skill if Jira is configured."""
+    jira_url = os.getenv("JIRA_URL", "")
+    if not jira_url:
+        return ""
+    return f"""
+
+# Monthly HC01 Deployment Error Report Skill
+
+When asked to generate a monthly deployment error report (e.g. "generate March 2026 report",
+"last month's deployment errors", "HC01 monthly report"), follow these steps using Bash + curl.
+
+JIRA_URL={jira_url}
+Use `Authorization: Bearer $JIRA_TOKEN` for all Jira API calls.
+
+## Step 1 — Resolve the target month
+Determine YYYY-MM-01 and YYYY-MM-LD (last day). Default to previous calendar month if unspecified.
+
+## Step 2 — Fetch all tickets via JQL (paginate in batches of 100)
+```bash
+curl -s -X POST "$JIRA_URL/rest/api/2/search" \\
+  -H "Authorization: Bearer $JIRA_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{{"jql":"project = HC01 AND labels = \\"Deployment-Error\\" AND summary ~ \\"Deployment issue\\" AND created >= \\"YYYY-MM-01\\" AND created <= \\"YYYY-MM-LD\\" ORDER BY created ASC","maxResults":100,"startAt":0,"fields":["summary","status","created"]}}'
+```
+Repeat with startAt=100, 200, ... until startAt >= total.
+Extract per ticket: key, landscape (from summary "Deployment issue in X" → X), status, created.
+
+## Step 3 — Fetch first comment for each ticket (extract error summary)
+```bash
+curl -s "$JIRA_URL/rest/api/2/issue/HC01-XXXXXX/comment?maxResults=1" \\
+  -H "Authorization: Bearer $JIRA_TOKEN"
+```
+From the first comment body, extract the text between {{code:java}} and {{code}} after "*Error Summary*".
+Process tickets in batches — write a short python3 script to /tmp/classify.py if needed to handle
+JSON parsing and classification efficiently. Do NOT fetch comments one-by-one interactively —
+use a bash loop or python script to batch process all tickets.
+
+## Step 4 — Classify each ticket into an error category
+Use keyword matching (first match wins) on the error_summary:
+- "machine image" / "unsupported" / version numbers like "1887" → Unsupported Machine Image Version
+- "etcd" / "database space" / "exceeded" / "etcdserver" → etcd Disk Full
+- "invalidclienterror" / "client authentication failure" → InvalidClientError (Auth Failure)
+- "vault" + ("400" or "403" or "log in") → Vault Login Failure
+- "kyverno" / "mutate-policy" → Kyverno Webhook Failure
+- "ssl" / "unexpected eof" / "bad certificate" / "maxretryerror" → SSL/TLS Certificate Error
+- "forbidden" / "403" / "serviceaccount" / "rbac" → 403 Forbidden / RBAC Error
+- "worker resource" / "machinedeployment" / "not updated" → Worker/Machine Deployment Timeout
+- "context deadline exceeded" → Context Deadline Exceeded
+- "name resolution" / "nameresolutionerror" → DNS / Name Resolution Error
+- "seed" + ("not ready" or "unhealthy") → Seed Not Ready / Unhealthy
+- "common.py" / "wrapper function" → hc-tool Script Error
+- "timeouterror" / "reconciliation" / "time limit" → Generic Reconciliation Timeout
+- "deploy_landscape" / "configuration parameters" → Deploy Landscape Config Error
+- "non-zero exit" / "kubectl apply" → kubectl Apply Non-zero Exit
+- "admission webhook" / "immutable" → Admission Webhook Immutable Field
+- "service unavailable" / "503" → Service Unavailable (503)
+- empty error_summary → (No error info available)
+- anything else → Other / Uncategorized
+
+## Step 5 — Identify mass incidents
+Group tickets by category. A mass incident = 5+ tickets in the same category within a 48h window.
+
+## Step 6 — Render markdown report
+Output:
+```
+# Deployment Error Report — [Month YYYY]
+**Total tickets:** N  |  **Date range:** YYYY-MM-01 – YYYY-MM-LD
+
+## Error Category Summary
+| # | Error Category | Tickets | Unique Landscapes | Potential Improvement |
+...
+
+## Mass Incidents (if any)
+...
+
+## Top Recurring Landscapes
+...
+```
+"""
+
 SYSTEM_PROMPT = os.getenv("CLAUDE_SYSTEM_PROMPT", """You are a Kubernetes and CI/CD operations agent for SAP HANA Cloud environments.
 You have kubectl configured with multiple cluster contexts.
 Use Bash tool to run kubectl commands directly.
@@ -167,7 +250,7 @@ Available MCP tools (prefer over raw bash when applicable):
 - github MCP: GitHub (list_pull_requests, get_file_contents, search_code, create_pull_request, etc.)
 - dod MCP: Jira tickets (analysis_ticket, search_tickets)
 - landscape-pipeline MCP: CI/CD analysis (get_pipeline_info, get_suggestion, list_pipeline_logs)
-""") + _ci_skills_section()
+""") + _ci_skills_section() + _monthly_report_skill()
 
 AGENT_NAME = os.getenv("AGENT_NAME", "claude_code_k8s_agent")
 AGENT_DESCRIPTION = os.getenv("AGENT_DESCRIPTION", "K8s and CI/CD operations agent powered by Claude Code")
