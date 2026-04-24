@@ -1,0 +1,82 @@
+# =============================================================================
+# Scheduled Pipeline Report CronJob
+# Sends a request to claude-code-agent via kagent controller every 6 hours.
+# Results appear in kagent UI under claude-code-agent chat history.
+#
+# Deploy: kubectl apply -f cronjob.yaml -n dbci-agent
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pipeline-report-scheduler
+  namespace: dbci-agent
+spec:
+  schedule: "0 */6 * * *"   # Every 6 hours: 00:00, 06:00, 12:00, 18:00 UTC
+  concurrencyPolicy: Forbid  # Skip if previous run still going
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600  # Kill job if it runs over 10 minutes
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: scheduler
+              image: curlimages/curl:8.6.0
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  KAGENT_API="http://kagent-controller.kagent.svc.cluster.local:8083"
+                  AGENT_REF="dbci_agent__NS__claude_code_agent"
+                  REPORT_TIME=$(date -u "+%Y-%m-%d %H:00 UTC")
+
+                  echo "=== Pipeline Report Scheduler: ${REPORT_TIME} ==="
+
+                  # Step 1: Create a new session for this scheduled run
+                  echo "Creating session..."
+                  SESSION_RESP=$(curl -sf -X POST "${KAGENT_API}/api/sessions" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"agent_ref\":\"${AGENT_REF}\",\"name\":\"[Scheduled] Pipeline Report ${REPORT_TIME}\"}")
+                  echo "Session response: ${SESSION_RESP}"
+
+                  SESSION_ID=$(echo "${SESSION_RESP}" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+                  if [ -z "${SESSION_ID}" ]; then
+                    echo "ERROR: Failed to get session ID"
+                    exit 1
+                  fi
+                  echo "Session ID: ${SESSION_ID}"
+
+                  # Step 2: Send the A2A message to trigger the agent
+                  echo "Sending message to agent..."
+                  MSG_RESP=$(curl -sf -X POST \
+                    "${KAGENT_API}/api/a2a/dbci-agent/claude-code-agent" \
+                    -H "Content-Type: application/json" \
+                    -d "{
+                      \"jsonrpc\": \"2.0\",
+                      \"id\": \"scheduled-$(date +%s)\",
+                      \"method\": \"message/send\",
+                      \"params\": {
+                        \"contextId\": \"${SESSION_ID}\",
+                        \"message\": {
+                          \"role\": \"user\",
+                          \"parts\": [{
+                            \"kind\": \"text\",
+                            \"text\": \"[定时报告 ${REPORT_TIME}] 请使用 HANA 数据库执行以下分析并生成报告：\n1. 最近24小时 pipeline 整体失败率\n2. 失败次数最多的 Top 5 Pipeline（按 SOURCE_BRANCH 分组）\n3. 当前是否有运行超过6小时的僵尸 Pipeline\n\n请用中文回复，结果用表格展示。\"
+                          }]
+                        }
+                      }
+                    }")
+
+                  echo "Message response: $(echo ${MSG_RESP} | head -c 500)"
+                  echo "=== Done ==="
+              resources:
+                requests:
+                  memory: "32Mi"
+                  cpu: "10m"
+                limits:
+                  memory: "64Mi"
+                  cpu: "50m"
