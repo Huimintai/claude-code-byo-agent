@@ -7,6 +7,7 @@ import json
 import asyncio
 import logging
 import uuid
+import signal
 import urllib.request
 from contextlib import asynccontextmanager
 
@@ -147,25 +148,38 @@ Use `Authorization: Bearer $JIRA_TOKEN` for all Jira API calls.
 ## Step 1 — Resolve the target month
 Determine YYYY-MM-01 and YYYY-MM-LD (last day). Default to previous calendar month if unspecified.
 
-## Step 2 — Fetch all tickets via JQL (paginate in batches of 100)
-```bash
-curl -s -X POST "$JIRA_URL/rest/api/2/search" \\
-  -H "Authorization: Bearer $JIRA_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{{"jql":"project = HC01 AND labels = \\"Deployment-Error\\" AND summary ~ \\"Deployment issue\\" AND created >= \\"YYYY-MM-01\\" AND created <= \\"YYYY-MM-LD\\" ORDER BY created ASC","maxResults":100,"startAt":0,"fields":["summary","status","created"]}}'
+## Step 2 — Fetch all tickets via JQL (paginate in batches of 50)
+Use a python3 script (not bash loop) to fetch all tickets efficiently.
+The script MUST handle 429 rate limiting with exponential backoff (sleep 60s on first 429, 120s on second).
+Example pattern:
+```python
+import requests, time, os
+headers = {{"Authorization": f"Bearer {{os.environ['JIRA_TOKEN']}}", "Content-Type": "application/json"}}
+tickets = []
+start_at = 0
+while True:
+    resp = requests.post(f"{{JIRA_URL}}/rest/api/2/search",
+        headers=headers,
+        json={{"jql": "...", "maxResults": 50, "startAt": start_at, "fields": ["summary","status","created"]}})
+    if resp.status_code == 429:
+        time.sleep(60); continue
+    data = resp.json()
+    tickets.extend(data["issues"])
+    if start_at + 50 >= data["total"]: break
+    start_at += 50
+    time.sleep(1)  # 1s between pages to avoid rate limiting
 ```
-Repeat with startAt=100, 200, ... until startAt >= total.
-Extract per ticket: key, landscape (from summary "Deployment issue in X" → X), status, created.
 
 ## Step 3 — Fetch first comment for each ticket (extract error summary)
-```bash
-curl -s "$JIRA_URL/rest/api/2/issue/HC01-XXXXXX/comment?maxResults=1" \\
-  -H "Authorization: Bearer $JIRA_TOKEN"
-```
-From the first comment body, extract the text between {{code:java}} and {{code}} after "*Error Summary*".
-Process tickets in batches — write a short python3 script to /tmp/classify.py if needed to handle
-JSON parsing and classification efficiently. Do NOT fetch comments one-by-one interactively —
-use a bash loop or python script to batch process all tickets.
+Fetch comments in the SAME python3 script as Step 2, with rate limit handling:
+- Add `time.sleep(0.5)` between each comment request
+- On HTTP 429: sleep 60s then retry
+- Extract text between `{{code:java}}` and `{{code}}` after `*Error Summary*`
+- If no comment or pattern not found, use empty string
+
+IMPORTANT: Write ONE combined python3 script to /tmp/hc01_report.py that does Steps 2+3+4+5+6
+all in one run. Do NOT split into multiple scripts or bash loops.
+The script must print the final markdown report to stdout when done.
 
 ## Step 4 — Classify each ticket into an error category
 Use keyword matching (first match wins) on the error_summary:
@@ -508,14 +522,19 @@ async def run_claude_code(prompt: str) -> str:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,  # creates new process group so we can kill all children
     )
 
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=CLAUDE_TIMEOUT)
     except asyncio.TimeoutError:
-        proc.kill()
+        # Kill entire process group (claude + any child processes like python3)
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            proc.kill()
         await proc.communicate()
-        logger.warning(f"Claude Code timed out after {CLAUDE_TIMEOUT}s, process killed")
+        logger.warning(f"Claude Code timed out after {CLAUDE_TIMEOUT}s, process group killed")
         return (
             f"The operation is taking longer than {CLAUDE_TIMEOUT} seconds. "
             "For long-running tasks like git clone or large downloads, the background process "
