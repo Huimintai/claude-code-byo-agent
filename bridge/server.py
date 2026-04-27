@@ -407,16 +407,22 @@ async def _handle_stream(body: dict, request: Request = None):
 
     logger.info(f"Received streaming message (task={task_id}): {user_message[:100]}...")
 
-    # Run Claude Code as a background task so it continues even if SSE client disconnects
+    # Create background task. asyncio.shield() in event_stream prevents cancellation
+    # from propagating to this task when the SSE client disconnects.
     claude_task = asyncio.create_task(run_claude_code(user_message))
 
-    # Always persist the result when done, regardless of whether SSE client is still connected
+    # Persist result via callback — fires even if SSE client disconnects
     def _on_claude_done(fut: asyncio.Future):
         try:
             result_text = fut.result()
         except Exception as e:
             result_text = f"Error: {e}"
-        asyncio.ensure_future(_persist_task(task_id, context_id, user_message, result_text, user_id))
+        # Use get_event_loop().create_task() — safe from a done_callback context
+        try:
+            loop = asyncio.get_event_loop()
+            loop.create_task(_persist_task(task_id, context_id, user_message, result_text, user_id))
+        except Exception as cb_err:
+            logger.error(f"Failed to schedule persist in callback: {cb_err}")
 
     claude_task.add_done_callback(_on_claude_done)
 
@@ -431,7 +437,9 @@ async def _handle_stream(body: dict, request: Request = None):
         })
 
         try:
-            result_text = await claude_task
+            # asyncio.shield() prevents SSE-client-disconnect cancellation from
+            # propagating into claude_task — the subprocess keeps running.
+            result_text = await asyncio.shield(claude_task)
             last_chunk = True
             # Send artifact
             yield _sse_event({
@@ -445,7 +453,7 @@ async def _handle_stream(body: dict, request: Request = None):
                 "lastChunk": last_chunk,
                 "append": False,
             })
-            # Send completed (final) — persistence is handled by _on_claude_done callback
+            # Send completed (final) — persistence also handled by _on_claude_done callback
             yield _sse_event({
                 "kind": "status-update",
                 "taskId": task_id,
@@ -453,6 +461,10 @@ async def _handle_stream(body: dict, request: Request = None):
                 "status": {"state": "completed"},
                 "final": True,
             })
+        except asyncio.CancelledError:
+            # SSE client disconnected — claude_task is still running thanks to shield()
+            # _on_claude_done callback will persist the result when it finishes
+            logger.info(f"SSE client disconnected for task={task_id}, claude_task continues in background")
         except Exception as e:
             yield _sse_event({
                 "kind": "status-update",
