@@ -17,7 +17,7 @@ spec:
   description: "Monthly HC01 deployment error report generator — analyzes Jira tickets and classifies errors"
   byo:
     deployment:
-      image: huimin123/claude-code-byo-agent:v25
+      image: huimin123/claude-code-byo-agent:v26
       env:
         - name: ANTHROPIC_BASE_URL
           value: "http://sap-ai-proxy.dbci-agent.svc.cluster.local:3030"
@@ -31,8 +31,6 @@ spec:
           value: "claude-sonnet-4-5-20250929"
         - name: PORT
           value: "8080"
-        - name: CLAUDE_DEBUG
-          value: "1"
         - name: JIRA_URL
           valueFrom:
             secretKeyRef:

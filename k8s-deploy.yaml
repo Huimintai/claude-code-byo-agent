@@ -2,29 +2,19 @@
 # Claude Code BYO Agent - Complete K8s Deployment
 # =============================================================================
 # Components:
-#   1. Secret: sap-ai-proxy credentials
-#   2. sap-ai-proxy Deployment + Service (in-cluster model routing)
-#   3. Claude Code BYO Agent CRD
+#   1. sap-ai-proxy Deployment + Service (in-cluster model routing)
+#   2. Claude Code BYO Agent CRD
+#
+# NOTE: sap-ai-proxy-secret must be created separately (contains real credentials):
+#   kubectl create secret generic sap-ai-proxy-secret -n dbci-agent \
+#     --from-literal=AICORE_CLIENT_ID='...' \
+#     --from-literal=AICORE_CLIENT_SECRET='...' \
+#     --from-literal=AICORE_AUTH_URL='...' \
+#     --from-literal=AICORE_BASE_URL='...' \
+#     --from-literal=AICORE_RESOURCE_GROUP='default'
 #
 # Deploy: kubectl apply -f k8s-deploy.yaml -n dbci-agent
 # =============================================================================
-
-# =============================================================================
-# 1. Secret for sap-ai-proxy
-# =============================================================================
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: sap-ai-proxy-secret
-  namespace: dbci-agent
-type: Opaque
-stringData:
-  AICORE_CLIENT_ID: "<YOUR_AICORE_CLIENT_ID>"
-  AICORE_CLIENT_SECRET: "<YOUR_AICORE_CLIENT_SECRET>"
-  AICORE_AUTH_URL: "<YOUR_AICORE_AUTH_URL>"
-  AICORE_BASE_URL: "<YOUR_AICORE_BASE_URL>"
-  AICORE_RESOURCE_GROUP: "default"
 
 # =============================================================================
 # 2. sap-ai-proxy Deployment + Service
@@ -109,7 +99,7 @@ spec:
   description: "K8s and CI/CD operations agent powered by Claude Code CLI"
   byo:
     deployment:
-      image: huimin123/claude-code-byo-agent:v25
+      image: huimin123/claude-code-byo-agent:v26
       env:
         - name: ANTHROPIC_BASE_URL
           value: "http://sap-ai-proxy.dbci-agent.svc.cluster.local:3030"
