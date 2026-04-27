@@ -150,7 +150,9 @@ Determine YYYY-MM-01 and YYYY-MM-LD (last day). Default to previous calendar mon
 
 ## Step 2 — Fetch all tickets via JQL (paginate in batches of 50)
 Use a python3 script (not bash loop) to fetch all tickets efficiently.
-The script MUST handle 429 rate limiting with exponential backoff (sleep 60s on first 429, 120s on second).
+The script MUST handle 429 rate limiting with a fixed 60s sleep (NOT exponential backoff).
+On 429, sleep exactly 60s and retry — do NOT increase the wait time.
+If still getting 429 after 3 retries, skip that page and continue.
 Example pattern:
 ```python
 import requests, time, os
@@ -158,11 +160,17 @@ headers = {{"Authorization": f"Bearer {{os.environ['JIRA_TOKEN']}}", "Content-Ty
 tickets = []
 start_at = 0
 while True:
-    resp = requests.post(f"{{JIRA_URL}}/rest/api/2/search",
-        headers=headers,
-        json={{"jql": "...", "maxResults": 50, "startAt": start_at, "fields": ["summary","status","created"]}})
-    if resp.status_code == 429:
-        time.sleep(60); continue
+    for attempt in range(3):
+        resp = requests.post(f"{{JIRA_URL}}/rest/api/2/search",
+            headers=headers,
+            json={{"jql": "...", "maxResults": 50, "startAt": start_at, "fields": ["summary","status","created"]}})
+        if resp.status_code == 429:
+            print(f"Rate limited (429). Waiting 60s (attempt {{attempt+1}}/3)...", file=sys.stderr)
+            time.sleep(60)
+        else:
+            break
+    if resp.status_code != 200:
+        break  # skip on persistent error
     data = resp.json()
     tickets.extend(data["issues"])
     if start_at + 50 >= data["total"]: break
@@ -399,8 +407,11 @@ async def _handle_stream(body: dict, request: Request = None):
 
     logger.info(f"Received streaming message (task={task_id}): {user_message[:100]}...")
 
+    # Run Claude Code as a background task so it continues even if SSE client disconnects
+    claude_task = asyncio.create_task(run_claude_code(user_message))
+
     async def event_stream():
-        # Send working status
+        # Send working status immediately
         yield _sse_event({
             "kind": "status-update",
             "taskId": task_id,
@@ -410,7 +421,7 @@ async def _handle_stream(body: dict, request: Request = None):
         })
 
         try:
-            result_text = await run_claude_code(user_message)
+            result_text = await claude_task
             last_chunk = True
             # Send artifact
             yield _sse_event({
