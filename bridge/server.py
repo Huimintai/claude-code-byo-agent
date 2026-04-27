@@ -347,9 +347,11 @@ async def send_message_stream(request: Request):
 async def _handle_send(body: dict, request: Request = None):
     """Handle message/send — returns JSON response."""
     user_message = _extract_text(body)
-    task_id = body.get("params", {}).get("taskId") or str(uuid.uuid4())
-    context_id = body.get("params", {}).get("contextId") or task_id
+    params = body.get("params", {})
+    task_id = params.get("taskId") or str(uuid.uuid4())
+    context_id = params.get("contextId") or task_id
     user_id = (request.headers.get("X-User-ID", "") if request else "") or "admin@kagent.dev"
+    logger.info(f"[send] task_id={task_id} context_id={context_id} user_id={user_id} params_keys={list(params.keys())}")
 
     logger.info(f"Received message (task={task_id}): {user_message[:100]}...")
 
@@ -387,9 +389,11 @@ async def _handle_send(body: dict, request: Request = None):
 async def _handle_stream(body: dict, request: Request = None):
     """Handle message/stream — returns SSE response."""
     user_message = _extract_text(body)
-    task_id = body.get("params", {}).get("taskId") or str(uuid.uuid4())
-    context_id = body.get("params", {}).get("contextId") or task_id
+    params = body.get("params", {})
+    task_id = params.get("taskId") or str(uuid.uuid4())
+    context_id = params.get("contextId") or task_id
     user_id = (request.headers.get("X-User-ID", "") if request else "") or "admin@kagent.dev"
+    logger.info(f"[stream] task_id={task_id} context_id={context_id} user_id={user_id} params_keys={list(params.keys())}")
 
     logger.info(f"Received streaming message (task={task_id}): {user_message[:100]}...")
 
