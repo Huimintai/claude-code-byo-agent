@@ -410,6 +410,16 @@ async def _handle_stream(body: dict, request: Request = None):
     # Run Claude Code as a background task so it continues even if SSE client disconnects
     claude_task = asyncio.create_task(run_claude_code(user_message))
 
+    # Always persist the result when done, regardless of whether SSE client is still connected
+    def _on_claude_done(fut: asyncio.Future):
+        try:
+            result_text = fut.result()
+        except Exception as e:
+            result_text = f"Error: {e}"
+        asyncio.ensure_future(_persist_task(task_id, context_id, user_message, result_text, user_id))
+
+    claude_task.add_done_callback(_on_claude_done)
+
     async def event_stream():
         # Send working status immediately
         yield _sse_event({
@@ -435,9 +445,7 @@ async def _handle_stream(body: dict, request: Request = None):
                 "lastChunk": last_chunk,
                 "append": False,
             })
-            # Persist task to kagent DB so it survives page refresh
-            await _persist_task(task_id, context_id, user_message, result_text, user_id)
-            # Send completed (final)
+            # Send completed (final) — persistence is handled by _on_claude_done callback
             yield _sse_event({
                 "kind": "status-update",
                 "taskId": task_id,
